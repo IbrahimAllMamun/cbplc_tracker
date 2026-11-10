@@ -382,13 +382,16 @@ body.role-viewer [data-act="add-task"]{display:none!important}
 
 <div class="auth" id="auth" hidden>
   <form class="auth-card" id="authForm" novalidate>
-    <h1>Sign in</h1>
-    <p>Use the email address you were invited with.</p>
+    <h1 id="au-title">Sign in</h1>
+    <p id="au-sub">Use the email address you were invited with.</p>
+    <div class="fld" id="au-name-f" hidden><label for="au-name">Full name</label><input id="au-name" type="text" autocomplete="name"></div>
     <div class="fld"><label for="au-email">Email</label><input id="au-email" type="email" autocomplete="username" autocapitalize="off" spellcheck="false"></div>
     <div class="fld" id="au-pw-f"><label for="au-pw">Password</label><input id="au-pw" type="password" autocomplete="current-password"></div>
+    <div class="fld" id="au-confirm-f" hidden><label for="au-confirm">Confirm password</label><input id="au-confirm" type="password" autocomplete="new-password"></div>
     <div class="auth-msg" id="authMsg" role="alert"></div>
     <button class="btn primary" type="submit" id="au-go">Sign in</button>
     <button class="linkbtn" type="button" id="au-link">Email me a sign-in link instead</button>
+    <button class="linkbtn" type="button" id="au-switch">New here? Create an account</button>
   </form>
   <div class="auth-card" id="authBlocked" hidden>
     <h1>No access</h1>
@@ -397,7 +400,7 @@ body.role-viewer [data-act="add-task"]{display:none!important}
   </div>
 </div>
 <script src="config.js"></script>
-<script src="vendor/supabase-2.118.0.js"></script>
+<script src="supabase-2.118.0.js"></script>
 <script>
 "use strict";
 
@@ -1209,12 +1212,20 @@ function showAuth(msg, opts = {}) {
 const hideAuth = () => { authEl().hidden = true; };
 function setAuthMode(mode) {
   authMode = mode;
+  const signup = mode === "signup";
+  $("#au-name-f").hidden = !signup;
   $("#au-pw-f").hidden = mode === "link";
-  $("#au-go").textContent = mode === "link" ? "Email me a sign-in link" : "Sign in";
+  $("#au-confirm-f").hidden = !signup;
+  $("#au-title").textContent = signup ? "Create account" : "Sign in";
+  $("#au-sub").textContent = signup ? "Use your work email address." : "Use the email address you were invited with.";
+  $("#au-go").textContent = signup ? "Create account" : (mode === "link" ? "Email me a sign-in link" : "Sign in");
+  $("#au-link").hidden = signup;
   $("#au-link").textContent = mode === "link" ? "Use my password instead" : "Email me a sign-in link instead";
+  $("#au-switch").textContent = signup ? "Already have an account? Sign in" : "New here? Create an account";
   $("#authMsg").textContent = "";
 }
 $("#au-link").addEventListener("click", () => setAuthMode(authMode === "link" ? "password" : "link"));
+$("#au-switch").addEventListener("click", () => setAuthMode(authMode === "signup" ? "password" : "signup"));
 $("#authForm").addEventListener("submit", async e => {
   e.preventDefault();
   const email = $("#au-email").value.trim(), pw = $("#au-pw").value;
@@ -1224,6 +1235,17 @@ $("#authForm").addEventListener("submit", async e => {
     if (authMode === "link") {
       const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: false, emailRedirectTo: location.origin + location.pathname } });
       if (error) showAuth("Could not send the link. Please try again in a few minutes."); else showAuth("If that address has access, a sign-in link is on its way. Open it in this browser.", { ok: true });
+    } else if (authMode === "signup") {
+      const name = $("#au-name").value.trim(), confirm = $("#au-confirm").value;
+      if (!pw || pw.length < 10) return showAuth("Choose a password with at least 10 characters.");
+      if (pw !== confirm) return showAuth("Passwords don't match.");
+      const { data: sdata, error } = await sb.auth.signUp({ email, password: pw, options: { data: { full_name: name } } });
+      if (error) {
+        showAuth(/registered/i.test(error.message) ? "An account with that email already exists. Sign in instead." : "Could not create the account. Please try again.");
+      } else if (!sdata.session) {
+        showAuth("Check your inbox to confirm your address, then sign in.", { ok: true });
+      }
+      // if a session comes back immediately (email confirmation off), onAuthStateChange picks it up and signs the person in
     } else {
       if (!pw) return showAuth("Enter your password.");
       const { error } = await sb.auth.signInWithPassword({ email, password: pw });

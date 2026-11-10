@@ -12,7 +12,9 @@ Stack: **GitHub Pages** (static frontend) + **Supabase** (Postgres, Auth, RLS). 
 ## One-time setup
 
 1. **Create the Supabase project.** Choose the region closest to your users. Free projects are paused after a week of inactivity, so use a paid plan if other people rely on this.
-2. **Lock down sign-ups.** In the Auth settings, turn off "Allow new users to sign up" and set the **Site URL** to your GitHub Pages address. Add people with *Authentication → Users → Invite user*.
+2. **Turn on self-service sign-up.** In Authentication → Providers → Email, turn ON "Allow new users to sign up" and turn OFF "Confirm email" (new accounts are active immediately, with no inbox-verification step). Set the **Site URL** to your GitHub Pages address. Anyone who visits the site can now create their own account from the "New here? Create an account" link on the sign-in screen — there is no domain restriction, and no admin step is required before they can log in.
+
+   > **Know the trade-off:** every new sign-up is auto-provisioned as a **viewer** (read-only), but the `projects_select`/`tasks_select` policies let any signed-in viewer read *all* projects and tasks — including the ones from IFC, XW Fintech and other partners. Open sign-up means anyone with any email address can read that data the moment they register. If you later want to restrict this (e.g. to a company email domain, or require admin approval before an account goes active), that's a small change to the sign-up trigger and the `profiles.active` default — ask for it if you need it.
 3. **Apply the migration.** Either `supabase link --project-ref <ref>` then `supabase db push`, or paste the SQL into the SQL editor.
 4. **Load the seed data** by running `seed.sql` once in the SQL editor.
 5. **Make yourself admin** after you have signed in once:
