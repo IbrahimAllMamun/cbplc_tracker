@@ -8,6 +8,8 @@ Stack: **GitHub Pages** (static frontend) + **Supabase** (Postgres, Auth, RLS). 
 |---|---|
 | `migrations/20261110000000_init.sql` | Schema, roles, Row Level Security, version checks, audit changelog |
 | `seed.sql` | The current HTML data: 11 projects, 58 tasks, settings |
+| `tracker-template.xlsx` | The master Excel template (Gantt chart, KPI formulas, conditional formatting). Required at deploy time: the in-app "Download Excel workbook" feature fetches this file, strips out any projects you didn't select, fills in live task data, and lets the person download the result. Must sit next to `index.html`. |
+| `jszip-3.10.2.min.js` | Vendored copy of [JSZip](https://stuartk.com/jszip/), used only for the Excel export above (reads/writes the `.xlsx` zip directly so every formula, data bar and chart in the template survives untouched). Must sit next to `index.html`. |
 
 ## One-time setup
 

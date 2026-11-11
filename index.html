@@ -269,6 +269,8 @@ main{min-width:0;padding:28px 32px 48px;max-width:1480px}
 .fld textarea{resize:vertical;min-height:64px;line-height:1.45}
 .fld input:focus,.fld select:focus,.fld textarea:focus{outline:none;border-color:var(--ink);box-shadow:0 0 0 3px rgba(35,31,32,.08)}
 .fld .hint{font-size:12px;color:var(--faint);margin-top:4px}
+.chk-row{display:flex;align-items:center;gap:8px;padding:6px 2px;font-size:13.5px;cursor:pointer}
+.chk-row input{margin:0}
 .fld.err input{border-color:var(--red)}
 .fld .msg{display:none;font-size:12px;color:var(--red-ink);margin-top:4px}
 .fld.err .msg{display:block}
@@ -358,6 +360,7 @@ body.role-viewer [data-act="add-task"]{display:none!important}
       <div class="menu-pop" role="menu">
         <button type="button" data-act="download"><svg class="i" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10"></path></svg>Download a copy</button>
         <button type="button" data-act="csv"><svg class="i" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"></rect><path d="M2.5 6.5h11M6.5 6.5v7"></path></svg>Export tasks for Excel (CSV)</button>
+        <button type="button" data-act="xlsx-export"><svg class="i" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"></rect><path d="M2.5 6.5h11M6.5 6.5v7M5 9l2 2.5M9 9l-2 2.5" fill="none"></path></svg>Download Excel workbook…</button>
         <button type="button" data-act="json"><svg class="i" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7 8 10.5 11.5 7"></path><path d="M2.5 11v2.5h11V11"></path></svg>Export backup</button>
         <button type="button" data-act="import"><svg class="i" viewBox="0 0 16 16"><path d="M8 10.5v-8M4.5 6 8 2.5 11.5 6"></path><path d="M2.5 11v2.5h11V11"></path></svg>Restore from backup</button>
         <hr>
@@ -401,6 +404,7 @@ body.role-viewer [data-act="add-task"]{display:none!important}
 </div>
 <script src="config.js"></script>
 <script src="supabase-2.118.0.js"></script>
+<script src="jszip-3.10.2.min.js"></script>
 <script>
 "use strict";
 
@@ -631,6 +635,192 @@ function download(text, name, type) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name;
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+/* ================= Excel workbook export (keeps the Gantt/formula template intact) =================
+   The exported file is built by editing the raw XML inside tracker-template.xlsx (a zip), not by
+   regenerating a spreadsheet from scratch. That keeps every formula, conditional-format rule, data
+   bar, merged cell and the Portfolio Overview chart byte-identical to the template; only the task
+   data itself is swapped in, and unselected project tabs are removed. */
+let _xlsxTemplateBuf = null;
+async function loadXlsxTemplate() {
+  if (_xlsxTemplateBuf) return _xlsxTemplateBuf;
+  const res = await fetch("tracker-template.xlsx");
+  if (!res.ok) throw new Error("tracker-template.xlsx not found (HTTP " + res.status + ")");
+  _xlsxTemplateBuf = await res.arrayBuffer();
+  return _xlsxTemplateBuf;
+}
+
+function xlExcelSerial(iso) {
+  if (!iso) return null;
+  const parts = String(iso).split("-").map(Number);
+  const y = parts[0], m = parts[1], d = parts[2];
+  if (!y || !m || !d) return null;
+  const utcDate = Date.UTC(y, m - 1, d);
+  const epoch = Date.UTC(1899, 11, 30);
+  return Math.round((utcDate - epoch) / 86400000);
+}
+function xlEscape(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function xlColNum(letters) { let n = 0; for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64); return n; }
+
+// Rewrites one or more cells within a single <row r="rowNum">...</row> block, preserving every
+// other cell verbatim (formulas, styles, shared-formula anchors). Inserts a cell where none
+// existed before, since template rows beyond the original task count are sparse.
+function xlSetRowCells(xml, rowNum, updates) {
+  const rowRe = new RegExp('(<row r="' + rowNum + '"[^>]*>)([\\s\\S]*?)(</row>)');
+  const m = xml.match(rowRe);
+  if (!m) return xml;
+  const [whole, openTag, body, closeTag] = m;
+  const cellRe = /<c r="([A-Z]+)\d+"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g;
+  const cells = {};
+  let cm;
+  while ((cm = cellRe.exec(body))) cells[cm[1]] = cm[0];
+  Object.keys(updates).forEach(col => {
+    const upd = updates[col];
+    const existingFull = cells[col];
+    let sAttr = "";
+    if (existingFull) { const sMatch = existingFull.match(/\ss="(\d+)"/); if (sMatch) sAttr = ' s="' + sMatch[1] + '"'; }
+    const ref = col + rowNum;
+    let newCellXml;
+    if (upd.type === "text") {
+      newCellXml = (upd.value === "" || upd.value == null) ? `<c r="${ref}"${sAttr}/>`
+        : `<c r="${ref}"${sAttr} t="inlineStr"><is><t xml:space="preserve">${xlEscape(upd.value)}</t></is></c>`;
+    } else {
+      newCellXml = (upd.value === "" || upd.value == null || Number.isNaN(upd.value)) ? `<c r="${ref}"${sAttr}/>`
+        : `<c r="${ref}"${sAttr}><v>${upd.value}</v></c>`;
+    }
+    cells[col] = newCellXml;
+  });
+  const colsSorted = Object.keys(cells).sort((a, b) => xlColNum(a) - xlColNum(b));
+  const newBody = colsSorted.map(c => cells[c]).join("");
+  return xml.slice(0, m.index) + openTag + newBody + closeTag + xml.slice(m.index + whole.length);
+}
+
+const XL_MAX_TASK_ROWS = 40; // template rows 10..49
+function xlPatchProjectSheet(xml, project) {
+  xml = xlSetRowCells(xml, 2, { B: { type: "text", value: project.name } });
+  xml = xlSetRowCells(xml, 6, { B: { type: "text", value: project.completion || "" }, D: { type: "text", value: project.focus || "" } });
+  const tasks = (project.tasks || []).filter(t => t.task).slice(0, XL_MAX_TASK_ROWS);
+  for (let i = 0; i < XL_MAX_TASK_ROWS; i++) {
+    const row = 10 + i, t = tasks[i];
+    xml = xlSetRowCells(xml, row, {
+      C: { type: "text", value: t ? t.task : "" },
+      D: { type: "text", value: t ? t.person : "" },
+      E: { type: "text", value: t ? t.org : "" },
+      F: { type: "text", value: t ? t.objective : "" },
+      G: { type: "num", value: t ? xlExcelSerial(t.start) : null },
+      H: { type: "num", value: t ? xlExcelSerial(t.due) : null },
+      J: { type: "text", value: t ? t.status : "" },
+      K: { type: "num", value: t ? (t.progress == null ? 0 : +t.progress) : null },
+      L: { type: "num", value: t ? xlExcelSerial(t.completedOn) : null },
+      N: { type: "text", value: t ? (t.comments || "") : "" },
+    });
+  }
+  return xml;
+}
+
+async function buildTrackerExcel(templateArrayBuffer, allProjects, selectedShorts) {
+  const zip = await JSZip.loadAsync(templateArrayBuffer);
+  const domParser = new DOMParser(), xmlSer = new XMLSerializer();
+  const nsMain = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+  const nsRel = "http://schemas.openxmlformats.org/package/2006/relationships";
+  const nsOfficeRel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const nsCT = "http://schemas.openxmlformats.org/package/2006/content-types";
+
+  const wbDoc = domParser.parseFromString(await zip.file("xl/workbook.xml").async("string"), "application/xml");
+  const relsDoc = domParser.parseFromString(await zip.file("xl/_rels/workbook.xml.rels").async("string"), "application/xml");
+  const ctDoc = domParser.parseFromString(await zip.file("[Content_Types].xml").async("string"), "application/xml");
+
+  const sheetEls = Array.from(wbDoc.getElementsByTagNameNS(nsMain, "sheet"));
+  const relEls = Array.from(relsDoc.getElementsByTagNameNS(nsRel, "Relationship"));
+  const relById = {}; relEls.forEach(r => { relById[r.getAttribute("Id")] = r; });
+
+  const includeOverview = selectedShorts.length === allProjects.length;
+  const keepNames = new Set(selectedShorts);
+  if (includeOverview) keepNames.add("Portfolio Overview");
+
+  const removedTargets = [];
+  sheetEls.forEach(sheetEl => {
+    const name = sheetEl.getAttribute("name");
+    if (!keepNames.has(name)) {
+      const rId = sheetEl.getAttributeNS(nsOfficeRel, "id");
+      const relEl = relById[rId];
+      if (relEl) { removedTargets.push(relEl.getAttribute("Target")); relEl.parentNode.removeChild(relEl); }
+      sheetEl.parentNode.removeChild(sheetEl);
+    }
+  });
+
+  // Print-area/print-titles definedNames are keyed to sheet position, which shifts when sheets
+  // are removed; dropping them entirely is safe (only affects print layout) and avoids corrupting indices.
+  Array.from(wbDoc.getElementsByTagNameNS(nsMain, "definedNames")).forEach(el => el.parentNode.removeChild(el));
+
+  const calcPr = wbDoc.getElementsByTagNameNS(nsMain, "calcPr")[0];
+  if (calcPr) calcPr.setAttribute("fullCalcOnLoad", "1"); // force recalculation against the new data on open
+
+  const calcChainRel = relEls.find(r => r.getAttribute("Target") === "calcChain.xml");
+  if (calcChainRel) { removedTargets.push("calcChain.xml"); calcChainRel.parentNode.removeChild(calcChainRel); }
+
+  if (!includeOverview) {
+    removedTargets.push("worksheets/_rels/sheet1.xml.rels", "drawings/drawing1.xml", "drawings/_rels/drawing1.xml.rels", "charts/chart1.xml");
+  }
+
+  removedTargets.forEach(target => { const path = "xl/" + target.replace(/^\/?/, ""); if (zip.file(path)) zip.remove(path); });
+  Array.from(ctDoc.getElementsByTagNameNS(nsCT, "Override")).forEach(ov => {
+    const pn = ov.getAttribute("PartName");
+    if (removedTargets.some(t => pn === "/xl/" + t.replace(/^\/?/, ""))) ov.parentNode.removeChild(ov);
+  });
+
+  zip.file("xl/workbook.xml", xmlSer.serializeToString(wbDoc));
+  zip.file("xl/_rels/workbook.xml.rels", xmlSer.serializeToString(relsDoc));
+  zip.file("[Content_Types].xml", xmlSer.serializeToString(ctDoc));
+
+  const projByShort = {}; allProjects.forEach(p => { projByShort[p.short] = p; });
+  for (const sheetEl of Array.from(wbDoc.getElementsByTagNameNS(nsMain, "sheet"))) {
+    const name = sheetEl.getAttribute("name");
+    if (name === "Portfolio Overview") continue; // left byte-identical, including its chart
+    const proj = projByShort[name];
+    if (!proj) continue;
+    const rId = sheetEl.getAttributeNS(nsOfficeRel, "id");
+    const relEl = relById[rId];
+    const target = "xl/" + relEl.getAttribute("Target").replace(/^\/?/, "");
+    let sheetXml = await zip.file(target).async("string");
+    sheetXml = xlPatchProjectSheet(sheetXml, proj);
+    zip.file(target, sheetXml);
+  }
+
+  return zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+}
+
+function xlsxExportModal() {
+  const projects = data.projects;
+  const rows = projects.map(p => `<label class="chk-row"><input type="checkbox" class="xl-p" value="${esc(p.id)}" checked><span>${esc(p.short || p.name)}</span></label>`).join("");
+  const wrap = modal({ title: "Download Excel workbook", size: "sm",
+    body: `<p class="hint" style="margin:0 0 10px">Each project you pick becomes its own formatted tab (with the Gantt chart and progress formulas), filled in with the current data. The Portfolio Overview summary tab is included only when every project is selected.</p>
+      <div style="margin-bottom:8px"><label class="chk-row"><input type="checkbox" id="xl-all" checked><span><b>Select all</b></span></label></div>
+      <div style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 10px">${rows}</div>`,
+    foot: `<span class="grow"></span><button class="btn" type="button" data-act="close-modal">Cancel</button><button class="btn primary" type="submit" id="xl-go">Download</button>`,
+    onSubmit: async w => {
+      const checked = Array.from(w.querySelectorAll(".xl-p:checked")).map(x => x.value);
+      if (!checked.length) { toast("Select at least one project."); return; }
+      const go = $("#xl-go", w); go.disabled = true; const prevTxt = go.textContent; go.textContent = "Building…";
+      try {
+        const buf = await loadXlsxTemplate();
+        const selectedShorts = projects.filter(p => checked.includes(p.id)).map(p => p.short);
+        const blob = await buildTrackerExcel(buf, projects, selectedShorts);
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob); a.download = (data.title || "Tracker").replace(/[^\w\- ]+/g, "").trim() + "_" + todayISO() + ".xlsx";
+        document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+        w._close(); toast("Excel workbook downloaded");
+      } catch (e) {
+        console.error(e); toast("Could not build the Excel file: " + (e.message || e));
+      } finally { go.disabled = false; go.textContent = prevTxt; }
+    } });
+  const all = $("#xl-all", wrap);
+  all.addEventListener("change", () => { $$(".xl-p", wrap).forEach(cb => cb.checked = all.checked); });
+  wrap.addEventListener("change", e => {
+    if (!e.target.classList.contains("xl-p")) return;
+    all.checked = $$(".xl-p", wrap).every(cb => cb.checked);
+  });
 }
 const deny = msg => { toast(msg || "You have view-only access to this project."); return false; };
 
@@ -1082,7 +1272,7 @@ function helpModal() {
       <h3>Change history</h3>
       <p>Every change is recorded with who made it, when, and the old and new values. See it in a project's <b>Activity</b> tab, in a task's <b>History</b> button, or under <b>Change history</b> in the menu. The history cannot be edited.</p>
       <h3>Reports</h3>
-      <ul><li><b>Export tasks for Excel</b> gives a CSV of every task.</li><li><b>Export backup</b> downloads a copy of the current data.</li></ul></div>`,
+      <ul><li><b>Export tasks for Excel (CSV)</b> gives a plain CSV of every task.</li><li><b>Download Excel workbook</b> lets you pick one or more projects and downloads a formatted .xlsx with a tab per project — same layout, Gantt chart and formulas as the master tracker file, filled in with the current data.</li><li><b>Export backup</b> downloads a copy of the current data.</li></ul></div>`,
     foot: `<span class="grow"></span><button class="btn primary" type="submit">Close</button>`, onSubmit: w => w._close() });
 }
 
@@ -1108,6 +1298,7 @@ async function act(name, el) {
     case "save": return saveFile(false);
     case "download": return saveFile(true);
     case "csv": return exportCSV();
+    case "xlsx-export": return xlsxExportModal();
     case "json": download(JSON.stringify(data, null, 1), "Tracker_backup_" + todayISO() + ".json", "application/json"); return toast("Backup exported");
     case "import": return toast("Restoring from a file is switched off. The data now lives in the shared database.");
     case "print": return window.print();
